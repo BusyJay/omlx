@@ -111,7 +111,7 @@ def _read_row_runs(fd, rows, base, row_bytes):
     return packed[inverse]
 
 
-def _resident_buffer(shape, dtype):
+def metal_backed_array(shape, dtype):
     """Share packed Metal storage with CPU gathers, without a host copy."""
     types = {
         np.dtype("<u4"): mx.uint32,
@@ -129,7 +129,11 @@ def _resident_buffer(shape, dtype):
     corner = tuple(slice(0, 1) for _ in shape)
     mx.eval(mx.sum(value[corner].astype(mx.float32)))
     mx.synchronize()
-    return np.asarray(value)
+    return value
+
+
+def _resident_buffer(shape, dtype):
+    return np.asarray(metal_backed_array(shape, dtype))
 
 
 class TensorFile:

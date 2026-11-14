@@ -841,7 +841,7 @@ class Model(nn.Module):
         out = self.model(inputs, cache)
         return self.lm_head(out)
 
-    def sanitize(self, weights):
+    def sanitize(self, weights, *, stack_nvfp4_scales=False):
         # Remove multi-token prediction layers
         mpt_layer = self.args.num_hidden_layers
         new_weights = {}
@@ -977,10 +977,13 @@ class Model(nn.Module):
                     self.args.quantization.pop(f"{prefix}.unembed_out", None)
 
         # Stack experts
+        expert_fields = ("weight", "scales", "biases")
+        if stack_nvfp4_scales:
+            expert_fields += ("weight_scale_2",)
         for l in range(self.args.num_hidden_layers):
             prefix = f"model.layers.{l}"
             for n, m in [("w1", "gate_proj"), ("w2", "down_proj"), ("w3", "up_proj")]:
-                for k in ["weight", "scales", "biases"]:
+                for k in expert_fields:
                     if f"{prefix}.mlp.experts.0.{m}.{k}" in weights:
                         to_join = [
                             weights.pop(f"{prefix}.mlp.experts.{e}.{m}.{k}")

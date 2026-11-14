@@ -2645,7 +2645,7 @@ class LanguageModel(nn.Module):
     def sanitize(self, weights):
         weights = {k: v for k, v in weights.items() if "mtp." not in k}
         weights = _dequantize_router_gates(weights, self.args.hidden_size)
-        weights = DSV32Model.sanitize(self, weights)
+        weights = DSV32Model.sanitize(self, weights, stack_nvfp4_scales=True)
 
         remapped = {}
         conv_parts = {}

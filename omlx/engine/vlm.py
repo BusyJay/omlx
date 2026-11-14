@@ -2094,13 +2094,21 @@ class VLMBatchedEngine(BaseEngine):
                         self._model_name,
                         trust_remote_code=self._trust_remote_code,
                     )
-                with _load_optiq_vision_sidecar_on_load(
-                    Path(self._model_name)
+                stream_weights = contextlib.nullcontext(False)
+                if model_type == "glm5_next":
+                    from ..patches.mlx_vlm_glm5_next_compat.modelopt import (
+                        stream_glm5_modelopt_weights,
+                    )
+
+                    stream_weights = stream_glm5_modelopt_weights(Path(self._model_name))
+                with (
+                    _load_optiq_vision_sidecar_on_load(Path(self._model_name)),
+                    stream_weights as streamed,
                 ):
                     load_kwargs = {
                         "trust_remote_code": self._trust_remote_code,
                     }
-                    if model_type == QWEN4_EXP_MODEL_TYPE:
+                    if model_type == QWEN4_EXP_MODEL_TYPE or streamed:
                         load_kwargs["lazy"] = True
                     # Expert offload wraps BEFORE materialization so non-resident
                     # experts never load; keep the load lazy only when the feature

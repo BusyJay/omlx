@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import json
+import struct
+
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
@@ -19,6 +22,7 @@ from omlx.patches.deepseek_v4.switch_layers import (
 from omlx.patches.mlx_vlm_glm5_next_compat import (
     apply_mlx_vlm_glm5_next_compat_patch,
 )
+from omlx.patches.mlx_vlm_glm5_next_compat.modelopt import stream_glm5_modelopt_weights
 from omlx.patches.mlx_vlm_mtp import glm5_next_vlm_runtime
 from omlx.patches.moe_gate_up_fusion import (
     apply_switch_glu_gate_up_fusion,
@@ -102,6 +106,77 @@ def test_install_ignores_other_scales_and_stand_ins():
 
 
 @requires_metal
+def test_streams_modelopt_expert_banks_across_shards(tmp_path):
+    from mlx_vlm import utils as vlm_utils
+    from mlx_vlm.quantization.checkpoint import transform_quantized_weights
+
+    raw = "model.language_model.layers.3.mlp"
+    packed = f"{raw}.switch_mlp.gate_proj"
+    shards = [{}, {}]
+    index = {}
+    for expert in (2, 0, 3, 1):
+        prefix = f"{raw}.experts.{expert}.gate_proj"
+        tensors = {
+            f"{prefix}.weight": mx.full((2, 8), expert + 17, dtype=mx.uint8),
+            f"{prefix}.weight_scale": mx.full((2, 1), expert + 30, dtype=mx.uint8),
+            f"{prefix}.weight_scale_2": mx.array(expert + 0.5),
+        }
+        shard = expert % 2
+        shards[shard].update(tensors)
+        index.update({key: f"{shard}.safetensors" for key in tensors})
+    shards[0]["model.norm.weight"] = mx.ones((2,), dtype=mx.bfloat16)
+    index["model.norm.weight"] = "0.safetensors"
+    paths = [tmp_path / f"{shard}.safetensors" for shard in range(len(shards))]
+    for path, tensors in zip(paths, shards):
+        mx.save_safetensors(str(path), tensors)
+        contents = path.read_bytes()
+        (length,) = struct.unpack_from("<Q", contents)
+        header = json.loads(contents[8 : 8 + length])
+        for key in tensors:
+            if key.endswith(".weight_scale"):
+                header[key]["dtype"] = "F8_E4M3"
+        raw_header = json.dumps(header).encode()
+        path.write_bytes(
+            struct.pack("<Q", len(raw_header)) + raw_header + contents[8 + length :]
+        )
+    original_shards = [path.read_bytes() for path in paths]
+
+    config = {
+        "text_config": {"n_routed_experts": E},
+        "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4"},
+    }
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps(config))
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": index})
+    )
+    original_loader = vlm_utils._load_safetensors
+    with stream_glm5_modelopt_weights(tmp_path) as streamed:
+        assert streamed
+        tensors = vlm_utils._load_safetensors(str(tmp_path / "0.safetensors"))
+        assert vlm_utils._load_safetensors(str(tmp_path / "1.safetensors")) == {}
+    assert vlm_utils._load_safetensors is original_loader
+    assert [path.read_bytes() for path in paths] == original_shards
+
+    config["quantization_config"] = {"mode": "affine"}
+    config_file.write_text(json.dumps(config))
+    with stream_glm5_modelopt_weights(tmp_path) as streamed:
+        assert not streamed
+        assert vlm_utils._load_safetensors is original_loader
+
+    tensors, recipe = transform_quantized_weights(
+        tensors, {"quant_method": "modelopt", "quant_algo": "NVFP4"}
+    )
+    assert recipe["mode"] == "nvfp4"
+    assert tensors["model.norm.weight"].dtype == mx.bfloat16
+    assert mx.array_equal(tensors[f"{packed}.weight_scale_2"], mx.arange(E) + 0.5)
+    for expert in range(E):
+        raw_bytes = tensors[f"{packed}.weight"][expert].view(mx.uint8)
+        assert mx.all(raw_bytes == expert + 17).item()
+        assert mx.all(tensors[f"{packed}.scales"][expert] == expert + 30).item()
+
+
+@requires_metal
 def test_decode_applies_global_scale():
     proj, dense = _load_gate(_Block())
     x = mx.random.normal((6, 1, K), key=mx.random.key(1))
@@ -180,7 +255,7 @@ def test_fused_nvfp4_matches_separate_projections(tokens):
     assert _rel(actual, expected) < 1e-2
 
 
-@pytest.mark.parametrize("mtp_naming", ["converted", "nextn"])
+@pytest.mark.parametrize("mtp_naming", ["converted", "nextn", "per_expert"])
 @pytest.mark.parametrize("with_scale", [False, True])
 def test_glm_sanitize_quantize_and_mtp_preserve_scales(mtp_naming, with_scale):
     apply_mlx_vlm_glm5_next_compat_patch()
@@ -228,9 +303,16 @@ def test_glm_sanitize_quantize_and_mtp_preserve_scales(mtp_naming, with_scale):
     before = dict(tree_flatten(model.parameters()))
     suffix = "weight_scale_2" if with_scale else "weight"
     value = ws2 if with_scale else mx.ones((E, N, K))
-    weights = model.sanitize(
-        {f"{backbone}.{suffix}": value, f"{mtp_input}.{suffix}": value}
-    )
+    source = {f"{backbone}.{suffix}": value, f"{mtp_input}.{suffix}": value}
+    if mtp_naming == "per_expert":
+        source = {
+            f"{prefix.replace('switch_mlp', f'experts.{expert}')}.{suffix}": value[
+                expert
+            ]
+            for prefix in (backbone, mtp_input)
+            for expert in range(E)
+        }
+    weights = model.sanitize(source)
     paths = [backbone, mtp]
     if not with_scale:
         assert set(weights) == {f"{path}.weight" for path in paths}
