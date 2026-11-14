@@ -486,6 +486,29 @@ def test_finished_request_keeps_context_at_its_fed_end():
     assert (kept.end, kept.context.shape[1]) == (8, 8)
 
 
+def test_finished_request_clips_oldest_chunk_before_storing_context():
+    drafter = _tiny_drafter()
+    drafter.bind_uid("a", 1)
+    row = drafter._row(1)
+    slots = drafter.ring_slots
+    values = mx.arange(2 * slots + 2).reshape(1, -1, 1)
+    row.end = slots
+    drafter._remember(row, values[:, :slots])
+    row.end += slots - 1
+    drafter._remember(row, values[:, slots : row.end])
+    tokens = list(range(row.end))
+    drafter.release_request("a", tokens)
+    kept = drafter._kept["a"]
+    assert kept.end == row.end
+    assert kept.tokens == tokens
+    assert mx.array_equal(kept.context, values[:, row.end - slots : row.end]).item()
+
+    cached = row.end - 2
+    assert drafter.prepare_request("b", tokens, cached) == slots - 2
+    restored, start = drafter._request_restored["b"]
+    assert mx.array_equal(restored, values[:, start:cached]).item()
+
+
 def test_released_context_is_dropped_once_its_request_is_gone():
     """A row the batch removes after its request finished, or a request that
     finishes without tokens, leaves no released context behind."""

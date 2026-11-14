@@ -347,9 +347,23 @@ class DFlashDrafter:
         history, end = released
         if end is None or end > len(tokens):
             return
-        context = history[0] if len(history) == 1 else mx.concatenate(history, axis=1)
-        if int(context.shape[1]) > self.ring_slots:
-            context = mx.contiguous(context[:, -self.ring_slots :])
+        # Select the retained rows before joining, so a prefix snapshot
+        # neither copies nor retains the evicted portion of the first chunk.
+        remaining = self.ring_slots
+        if remaining <= 0:
+            return
+        tail = []
+        for chunk in reversed(history):
+            take = min(remaining, int(chunk.shape[1]))
+            tail.append(chunk[:, -take:])
+            remaining -= take
+            if not remaining:
+                break
+        context = (
+            mx.contiguous(tail[0])
+            if len(tail) == 1
+            else mx.concatenate(tail[::-1], axis=1)
+        )
         # A lazy view would keep the full history or batch buffer alive.
         mx.async_eval(context)
         self._kept[request_id] = _KeptContext(
