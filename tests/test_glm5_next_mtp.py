@@ -842,6 +842,30 @@ def test_split_k_batched_decode_matches_rows_alone(monkeypatch, lengths):
     assert len(calls) == 2 * len(widths)
 
 
+@pytest.mark.skipif(
+    not language.nax_sparse_mla_available(), reason="split-K decode needs NAX"
+)
+def test_split_k_four_row_head_tiles_match_scalar_bitwise():
+    mx.random.seed(514)
+    before, width, heads, latent = 2053, 4, 64, 512
+    kv_len = before + width
+    n_pool = kv_len // 4
+    q = mx.random.normal((1, heads, width, latent)).astype(mx.bfloat16)
+    kv = mx.random.normal((1, 1, 2112, latent)).astype(mx.bfloat16)
+    windows = mx.broadcast_to(mx.arange(513, 1, -1, dtype=mx.int32), (width, 512))
+    keys = mx.arange(kv_len)[None, :]
+    mask = (keys <= before + mx.arange(width)[:, None]) & (keys % 31 != 0)
+
+    scalar = language.sparse_mla_decode(
+        q, kv[:, :, :kv_len], windows, before, n_pool, 0.0625, mask=mask
+    )
+    tiled = language.sparse_mla_decode_batched(
+        q, kv, kv_len, windows[None], mx.array([[n_pool, before, 0]], mx.int32),
+        0.0625, mask=mask,
+    )
+    assert mx.array_equal(scalar, tiled).item()
+
+
 @pytest.mark.parametrize("size", [2, 3, 4])
 @pytest.mark.parametrize("dtype", [mx.float32, mx.bfloat16])
 def test_masked_replay_restores_metadata(size, dtype):

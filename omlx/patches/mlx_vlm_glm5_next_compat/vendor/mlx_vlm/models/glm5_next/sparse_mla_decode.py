@@ -398,6 +398,13 @@ def _batched_source(src, edits):
 _B_SRC = _batched_source(
     _SRC,
     [
+        ("threadgroup float Pb[H * HALF];", "threadgroup float Pb[WM * 16 * HALF];", 1),
+        (
+            "const int wm = sg / WN;",
+            "const int wm = sg / WN;\n"
+            "    const int head_base = int(threadgroup_position_in_grid.z) * WM * 16;",
+            1,
+        ),
         (
             """    const int s = int(threadgroup_position_in_grid.y);    // query row
     const int S = dims[0];
@@ -429,10 +436,12 @@ _B_SRC = _batched_source(
         ),
         (
             "const device T* Qb = Q + (size_t(wm * 16) * S + s) * D;",
-            "const device T* Qb = Q + size_t(bi) * H * qstr + (size_t(wm * 16) * S + s) * D;",
+            "const device T* Qb = Q + size_t(bi) * H * qstr"
+            " + (size_t(head_base + wm * 16) * S + s) * D;",
             1,
         ),
         ("(KV + size_t(", "(KVb + size_t(", 8),
+        ("const int h = wm * 16 + row;", "const int h = head_base + wm * 16 + row;", 1),
         (
             "const size_t pidx = (size_t(s) * NB + kb) * H + h;",
             "const size_t pidx = (size_t(r) * NB + kb) * H + h;",
@@ -515,6 +524,14 @@ def sparse_mla_decode_batched(
         dtype=mx.int32,
     )
     attn_mask = _attention_mask(mask, batch_size, query_rows, kv_len)
+    # Two 256-thread groups let a short verify block schedule more head tiles.
+    # Head groups are independent and retain the original reductions.
+    head_tile = heads
+    if (
+        (batch_size, query_rows, heads, latent_dim) == (1, 4, 64, 512)
+        and q_latent.dtype == mx.bfloat16
+    ):
+        head_tile = 32
     blocks, merge = _get_batched()
     pm, pl, po = blocks(
         inputs=[
@@ -531,13 +548,13 @@ def sparse_mla_decode_batched(
             ("H", heads),
             ("D", latent_dim),
             ("BK", key_tile_rows),
-            ("WM", heads // _NAX_FRAGMENT_HEAD_ROWS),
+            ("WM", head_tile // _NAX_FRAGMENT_HEAD_ROWS),
             ("WN", _NAX_COLUMN_FRAGMENTS),
             ("KPOOL", kpool),
             ("HAS_MASK", mask is not None),
         ],
-        grid=(key_blocks * heads * 8, batch_size * query_rows, 1),
-        threadgroup=(heads * 8, 1, 1),
+        grid=(key_blocks * head_tile * 8, batch_size * query_rows, heads // head_tile),
+        threadgroup=(head_tile * 8, 1, 1),
         output_shapes=[
             (batch_size * query_rows, key_blocks, heads),
             (batch_size * query_rows, key_blocks, heads),
