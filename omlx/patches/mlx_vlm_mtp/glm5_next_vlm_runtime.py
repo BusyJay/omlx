@@ -292,7 +292,7 @@ def _patch_linear_attention(g5_lang: Any) -> None:
                 )
             else:
                 cache[0] = mx.contiguous(conv_input[:, -state_size:, :])
-        conv_out = nn.silu(self.conv1d(conv_input))
+        conv_out = self._conv_activation(conv_input)
 
         q, k, v = mx.split(conv_out, [self.qkv_dim, 2 * self.qkv_dim], axis=-1)
         q = q.reshape(B, S, self.num_heads, self.head_dim)

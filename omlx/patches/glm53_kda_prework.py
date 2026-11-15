@@ -13,8 +13,8 @@ side into one Metal dispatch:
   (row, head).
 
 Both kernels mirror the stock rounding sites so the fused path is
-bit-compatible with the unfused stock path (fp32 L2 sums, a single cast
-back to the activation dtype, bf16-domain conv/SiLU). The recurrence runs
+bit-compatible with the unfused stock path (fp32 L2 sums and convolution
+and SiLU in the convolution's dtype). The recurrence runs
 on the kernels in ``glm53_kda_recurrence`` (forget gate computed
 in-kernel; same math up to fp32 summation order), falling back to the stock
 ``gated_delta_update`` when the gate is not the fp32 safe-gate form.
@@ -58,9 +58,9 @@ _PREWORK_SOURCE = """
                 : qkv[(input_row - uint(NKEEP)) * uint(RS) + channel];
             acc += float(xv) * float(conv_w[channel * 4 + tap]);
         }
-        const T conv = T(acc);
+        const ConvT conv = ConvT(acc);
         const auto sy = 1 / (1 + metal::precise::exp(metal::abs(conv)));
-        const T act = conv * T((conv < T(0)) ? sy : 1 - sy);
+        const T act = T(conv * ConvT((conv < ConvT(0)) ? sy : 1 - sy));
         activated[i] = act;
         if (is_q || is_k) {
             const float f = float(act);
@@ -182,6 +182,7 @@ def kda_prework_fused(mixed, conv_state, conv_w, q_scale, length, heads, dim):
         inputs=[mixed, conv_state, conv_w, q_scale, mx.array(length, dtype=mx.int32)],
         template=[
             ("T", mixed.dtype),
+            ("ConvT", conv_w.dtype),
             ("H", heads),
             ("D", dim),
             ("C", c_dim),

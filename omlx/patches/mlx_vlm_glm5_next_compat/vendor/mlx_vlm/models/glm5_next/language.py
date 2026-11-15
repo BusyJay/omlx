@@ -740,7 +740,7 @@ class Glm5NextLinearAttention(nn.Module):
                 )
             else:
                 cache[0] = mx.contiguous(conv_input[:, -state_size:, :])
-        conv_out = nn.silu(self.conv1d(conv_input))
+        conv_out = self._conv_activation(conv_input)
 
         q, k, v = mx.split(conv_out, [self.qkv_dim, 2 * self.qkv_dim], axis=-1)
         q = q.reshape(B, S, self.num_heads, self.head_dim)
@@ -777,6 +777,16 @@ class Glm5NextLinearAttention(nn.Module):
         )
         out = self.o_norm(out, gate).reshape(B, S, -1)
         return linear_forward(self.o_proj, out)
+
+    @property
+    def _omlx_glm5_fp32_conv(self) -> bool:
+        return self.conv1d.weight.dtype == mx.float32
+
+    def _conv_activation(self, inputs: mx.array) -> mx.array:
+        # The raw ModelOpt checkpoint stores these filters in FP32. Keep
+        # their precision through SiLU, then return to the projection dtype
+        # before the L2 norm and recurrent update, as in GLM's causal conv.
+        return nn.silu(self.conv1d(inputs)).astype(inputs.dtype)
 
 
 def _small_selector_ok(indexer, pool, batch_size, query_rows):

@@ -2121,15 +2121,14 @@ _KDA_SOURCE = r"""
     for (int t = 0; t < TOK; t++) {
       win[CK - 1 + t] = proj[t * PROJ_W + gc];
     }
-    const device T* w = conv_w + gc * CK;
+    const device ConvT* w = conv_w + gc * CK;
     for (int t = 0; t < TOK; t++) {
       float acc = 0.0;
       for (int j = 0; j < CK; ++j) {
         acc += static_cast<float>(win[t + j]) * w[j];
       }
-      T co = static_cast<T>(acc);
-      T sgm = glm_sigmoid<T>(co);
-      T sv = co * sgm;
+      const ConvT co = static_cast<ConvT>(acc);
+      const T sv = static_cast<T>(co * glm_sigmoid<ConvT>(co));
       if (part == 0) {
         qs[t][i] = sv;
       } else if (part == 1) {
@@ -2408,7 +2407,7 @@ def kda_decode_step(
     qkv = heads * head_dim
     if not 1 <= T <= 8 or head_dim != 128 or heads < 1:
         return None
-    if conv_w.shape != (3 * qkv, 4, 1) or conv_w.dtype != proj.dtype:
+    if conv_w.shape != (3 * qkv, 4, 1) or conv_w.dtype not in (proj.dtype, mx.float32):
         return None
     if norm_w.shape != (head_dim,) or norm_w.dtype != proj.dtype:
         return None
@@ -2426,8 +2425,17 @@ def kda_decode_step(
         return None
     pre = a_pre is not None
     inputs_extra = []
-    template = [("T", proj.dtype), ("TOK", T), ("DK", head_dim), ("QKV", qkv),
-                ("PROJ_W", width), ("OFF_FA", off_fa), ("OFF_GA", off_ga), ("OFF_B", off_b)]
+    template = [
+        ("T", proj.dtype),
+        ("ConvT", conv_w.dtype),
+        ("TOK", T),
+        ("DK", head_dim),
+        ("QKV", qkv),
+        ("PROJ_W", width),
+        ("OFF_FA", off_fa),
+        ("OFF_GA", off_ga),
+        ("OFF_B", off_b),
+    ]
     if pre:
         if gate_pre is None or a_pre.shape != (1, T, qkv) or gate_pre.shape != (1, T, qkv):
             return None

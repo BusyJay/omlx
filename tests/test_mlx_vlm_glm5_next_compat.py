@@ -1339,7 +1339,7 @@ def _kda_reference_prework(mixed, conv_state, conv_w, heads, dim, q_scale):
     conv = nn.Conv1d(c_dim, c_dim, kernel_size=4, groups=c_dim, bias=False)
     conv.weight = conv_w
     conv_input = mx.concatenate([conv_state, mixed], axis=1)
-    activated = nn.silu(conv(conv_input))
+    activated = nn.silu(conv(conv_input)).astype(mixed.dtype)
     q, k, v = mx.split(activated, [heads * dim, 2 * heads * dim], axis=-1)
     shape = (1, length, heads, dim)
     q, k, v = q.reshape(shape), k.reshape(shape), v.reshape(shape)
@@ -1353,7 +1353,8 @@ def _kda_reference_prework(mixed, conv_state, conv_w, heads, dim, q_scale):
 
 
 @pytest.mark.parametrize("seq", [1, 2, 3, 5, 130])
-def test_kda_prework_kernel_matches_stock(seq):
+@pytest.mark.parametrize("conv_dtype", [mx.bfloat16, mx.float32])
+def test_kda_prework_kernel_matches_stock(seq, conv_dtype):
     from omlx.patches.glm53_kda_prework import kda_prework_fused
 
     mx.random.seed(41)
@@ -1361,7 +1362,7 @@ def test_kda_prework_kernel_matches_stock(seq):
     c_dim = 3 * heads * dim
     mixed = (mx.random.normal((1, seq, c_dim)) * 0.5).astype(mx.bfloat16)
     conv_state = (mx.random.normal((1, 3, c_dim)) * 0.5).astype(mx.bfloat16)
-    conv_w = (mx.random.normal((c_dim, 4, 1)) * 0.2).astype(mx.bfloat16)
+    conv_w = (mx.random.normal((c_dim, 4, 1)) * 0.2).astype(conv_dtype)
     q_scale = dim**-0.5
 
     q, k, v, next_state = kda_prework_fused(
@@ -4735,16 +4736,30 @@ def test_kda_affine_shared_weights_preserve_projections_and_serialization(
 
 @pytest.mark.usefixtures("glm5_fused_decode")
 @pytest.mark.parametrize(
-    "gate_bits,float_proj",
-    # float: the FP8 checkpoint's BF16 projections (a float bank matmul, the
-    # gate projections outside the kernel).
-    [(8, False), (5, False), (8, True)],
+    "gate_bits,float_proj,conv_dtype",
+    [
+        (8, False, mx.bfloat16),
+        (5, False, mx.bfloat16),
+        (8, True, mx.bfloat16),
+        (8, True, mx.float32),
+    ],
 )
-def test_kda_decode_step_is_bitwise_reference(gate_bits, float_proj, monkeypatch):
+def test_kda_decode_step_is_bitwise_reference(
+    gate_bits, float_proj, conv_dtype, monkeypatch
+):
+    from omlx.cache.paged_ssd_cache import numerics_revision_for_model
+
     language = _language()
     layer = _kda_layer(
         gate_bits=gate_bits, seed=gate_bits + float_proj, float_proj=float_proj
     )
+    if conv_dtype == mx.float32:
+        layer.conv1d.weight = mx.random.normal(
+            layer.conv1d.weight.shape, key=mx.random.key(13)
+        ) * 0.02
+        assert numerics_revision_for_model(layer) == "glm5-kda-conv-dtype-1"
+    else:
+        assert numerics_revision_for_model(layer) is None
     fused_cache, reference_cache = _arrays_cache(), _arrays_cache()
     prompt = (mx.random.normal((1, 12, 1024)) * 0.8).astype(mx.bfloat16)
     monkeypatch.setattr(language, "_DECODE_FUSION", False)
@@ -4758,6 +4773,7 @@ def test_kda_decode_step_is_bitwise_reference(gate_bits, float_proj, monkeypatch
         before = _stats()["kda"]
         fused = layer(x, cache=fused_cache)
         assert _stats()["kda"] == before + 1
+        assert fused.dtype == reference.dtype == x.dtype
         mx.eval(reference, fused, fused_cache.cache, reference_cache.cache)
         assert _mismatches(fused, reference) == 0, f"step {step} width {width}"
         assert _mismatches(fused_cache[0], reference_cache[0]) == 0

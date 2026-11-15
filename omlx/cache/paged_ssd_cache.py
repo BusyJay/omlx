@@ -409,6 +409,10 @@ def numerics_revision_for_model(model: Any) -> str | None:
     # Set by cast_bf16_params_to_fp16: KV computed before the recast is bf16.
     if any(getattr(module, "_omlx_fp16_recast", False) for module in modules):
         revisions.add("fp16-recast")
+    # Raw GLM NVFP4 convolutions keep FP32 weights but return the activation
+    # dtype before the recurrent update. Old prefixes could carry FP32 KV.
+    if any(getattr(module, "_omlx_glm5_fp32_conv", False) for module in modules):
+        revisions.add("glm5-kda-conv-dtype-1")
     # DeepSeek V4.1 CED prefill stores approximate decoder states.
     if any(
         type(module).__module__ == _DEEPSEEK_V41_LANGUAGE_MODULE
