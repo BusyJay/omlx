@@ -452,25 +452,28 @@ class Glm5NextLinearAttention(nn.Module):
             self._split_pts = pts
             self._fq = hasattr(mods[0], "scales")
             self._fw = mx.concatenate([m.weight for m in mods], axis=0)
+            banks = ()
             if self._fq:
                 self._fs = mx.concatenate([m.scales for m in mods], axis=0)
                 self._fb = mx.concatenate([m.biases for m in mods], axis=0)
                 self._gs, self._bits = mods[0].group_size, mods[0].bits
-                # Keep the public projections for their own callers, but let
-                # them share the fused affine bank. Realize first: views of an
-                # unevaluated concat would keep the source arrays alive.
                 if getattr(mods[0], "mode", "affine") == "affine":
-                    mx.eval(self._fw, self._fs, self._fb)
-                    for field, bank in (
+                    banks = (
                         ("weight", self._fw),
                         ("scales", self._fs),
                         ("biases", self._fb),
-                    ):
-                        for m, view in zip(mods, mx.split(bank, pts, axis=0)):
-                            # Concat can promote mixed metadata dtypes. An
-                            # unfused caller must keep its original dtype.
-                            if m[field].dtype == view.dtype:
-                                m[field] = view
+                    )
+            elif all(type(m) is nn.Linear for m in mods):
+                banks = (("weight", self._fw),)
+            if banks:
+                # Realize the fused banks before sharing their storage.
+                # Views of a lazy concat keep its original inputs alive.
+                mx.eval([bank for _, bank in banks])
+                for field, bank in banks:
+                    for m, view in zip(mods, mx.split(bank, pts, axis=0)):
+                        # Keep the public projection's dtype if concat promoted it.
+                        if m[field].dtype == view.dtype:
+                            m[field] = view
             self._fused_ready = True
         if self._fq:
             out = fused_quantized_matmul(

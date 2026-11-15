@@ -4550,9 +4550,11 @@ def _arrays_cache():
 @pytest.mark.skipif(
     not mx.metal.is_available(), reason="needs Metal allocation accounting"
 )
-def test_kda_affine_fusion_does_not_retain_a_second_weight_bank():
+@pytest.mark.parametrize("float_proj", [False, True])
+def test_kda_fusion_does_not_retain_a_second_weight_bank(float_proj):
     """After lazy fusion, the six public projections share the fused bank."""
-    layer = _kda_layer()
+    layer = _kda_layer(float_proj=float_proj)
+    fields = ("_fw",) if float_proj else ("_fw", "_fs", "_fb")
     x = mx.zeros((1, 1, 1024), dtype=mx.bfloat16)
     mx.eval(x)
     mx.synchronize()
@@ -4570,12 +4572,12 @@ def test_kda_affine_fusion_does_not_retain_a_second_weight_bank():
     # and how much of it shows up depends on earlier allocations, so the
     # padding is only an upper bound. A second bank would add sum(sizes).
     page = os.sysconf("SC_PAGE_SIZE")
-    sizes = [layer[name].nbytes for name in ("_fw", "_fs", "_fb")]
+    sizes = [layer[name].nbytes for name in fields]
     padding = sum((-size) % page if size > page else 0 for size in sizes)
     assert padding < sum(sizes)
     assert mx.get_active_memory() - before <= padding
     # Dropping and rebuilding the bank keeps the public projections usable.
-    for name in ("_fw", "_fs", "_fb"):
+    for name in fields:
         del layer[name]
     layer._fused_ready = False
     layer._decode_groups = None
