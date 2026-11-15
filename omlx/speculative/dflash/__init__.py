@@ -241,6 +241,15 @@ def load_dflash_drafter(
 
 def attach_drafter(language_model: Any, drafter: DFlashDrafter) -> None:
     """Expose the drafter to Lightning MTP through the language model markers."""
+    # Narrow fixed DFlash2 blocks are fast on GLM-5.3's usual decode path.
+    # Repeated text can still use the target's wider, capped copy window.
+    if (
+        getattr(language_model, "model_type", None) in {"glm5_next", "glm5_next_text"}
+        and drafter.kind == "dflash2"
+        and not drafter.adaptive
+        and drafter.block_size in (3, 4)
+    ):
+        drafter.context_copy = True
     language_model._omlx_drafter = drafter
     language_model._omlx_mtp_decode_enabled = True
     language_model._omlx_mtp_multi_request = not getattr(

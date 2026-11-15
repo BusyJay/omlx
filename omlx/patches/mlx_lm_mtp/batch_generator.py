@@ -3657,11 +3657,13 @@ def _run_verify_cycle_batched(gen_batch: Any, batch_state: _MtpBatchState) -> An
         for state in states:
             state.controller = None
             state.depth = requested
-    if _drafter_for(gen_batch.model) is not None or _shared_verify_width(gen_batch.model):
+    drafter = _drafter_for(gen_batch.model)
+    wide_copy = _drafter_uses_wide_copies(drafter)
+    if drafter is not None or _shared_verify_width(gen_batch.model):
         # Clip before grouping so rows that share a window verify together. A shared
         # verify host also drops drafts made deeper than the policy's (capped) depth.
         for state in states:
-            if state.chain:
+            if state.chain and not (wide_copy and state.copy_drafts):
                 _clip_block_drafts(
                     state,
                     (
@@ -4360,11 +4362,20 @@ def _max_verify_rows(model: Any) -> Optional[int]:
     return None
 
 
+def _drafter_uses_wide_copies(drafter: Any) -> bool:
+    return bool(
+        getattr(drafter, "context_copy", False)
+        and getattr(drafter, "kind", None) == "dflash2"
+    )
+
+
 def _context_copy_drafts(
     gen_batch: Any,
     state: _MtpState,
     committed_ids: List[int],
     block: Optional[int] = None,
+    *,
+    wide: bool = False,
 ) -> List[int]:
     """Draft the next window by copying from the context, if it repeats.
 
@@ -4374,7 +4385,8 @@ def _context_copy_drafts(
     so the Leviathan/Chen rule keeps the sampled distribution exact. Either
     way any draft source leaves the output distribution unchanged. Returns
     ``[]`` when the MTP head should draft instead. With ``block``, only a copy
-    of exactly that many tokens replaces the drafter's block.
+    of exactly that many tokens replaces the drafter's block. Wide copies
+    accept at least ``block`` drafts, up to the target's verify limit.
     """
     if state.context_copy is None:
         # A wide copy verifies MAX_COPY + 1 rows, so it must fit the target's
@@ -4390,6 +4402,10 @@ def _context_copy_drafts(
     room = (
         gen_batch.max_tokens[0] - gen_batch._num_tokens[0] - len(committed_ids) - 1
     )
+    if wide:
+        cap = _max_verify_rows(gen_batch.model)
+        copied = copier.propose(min(room, cap - 1) if cap is not None else room)
+        return copied if len(copied) >= (block or 0) else []
     if block is None and _dspark_host(gen_batch.model) is not None:
         # Copies verify in DSpark's window sizes, and only a copy that fills
         # the block replaces it: DSpark already drafts repeated text accurately.
@@ -4468,7 +4484,9 @@ def _run_verify_cycle_chain(
     procs = _proc_list(gen_batch)
     is_greedy = _is_greedy(gen_batch)
     drafter = _drafter_for(gen_batch.model)
-    if drafter is not None and verify_result is None:
+    wide_copy = _drafter_uses_wide_copies(drafter)
+    copying = wide_copy and state.copy_drafts
+    if drafter is not None and verify_result is None and not copying:
         # A shared verify was already built from the drafts it was given.
         _clip_block_drafts(
             state,
@@ -4525,6 +4543,7 @@ def _run_verify_cycle_chain(
     # settles this cycle; plain single-row cycles only.
     can_predraft = (
         drafter is not None
+        and not copying
         and procs is None
         and draft_jobs is None
         and commit_cache is None
@@ -4718,7 +4737,7 @@ def _run_verify_cycle_chain(
             prev_buf = gen_batch._token_context[0].tokens
         state.copy_drafts = False
         # A block drafter's row may verify a copy of a repeated stretch of the
-        # context instead of its block; only a copy that fills the block does.
+        # context instead of its block when the copy covers at least its depth.
         copied = []
         if (
             drafter is not None
@@ -4726,7 +4745,7 @@ def _run_verify_cycle_chain(
             and getattr(drafter, "context_copy", False)
         ):
             copied = _context_copy_drafts(
-                gen_batch, state, committed_ids, block=drafter.depth
+                gen_batch, state, committed_ids, block=drafter.depth, wide=wide_copy
             )
         if drafter is not None and predrafted and m == m_gpu:
             drafter.adopt_predraft(state, m + 1)

@@ -3767,7 +3767,8 @@ def test_block_drafter_matches_standard_and_feeds_committed_context(
 
 
 @pytest.mark.parametrize("wrong", [None, 0, 3])
-def test_block_drafter_copies_keep_output_and_context(monkeypatch, wrong):
+@pytest.mark.parametrize("wide", [False, True])
+def test_block_drafter_copies_keep_output_and_context(monkeypatch, wrong, wide):
     from omlx.patches.mlx_lm_mtp import context_copy
 
     prompt, limit = [1, 2], 30
@@ -3778,6 +3779,9 @@ def test_block_drafter_copies_keep_output_and_context(monkeypatch, wrong):
     model = _drafted_counting_model(5)
     drafter = model._omlx_drafter
     drafter.context_copy = True
+    if wide:
+        drafter.kind = "dflash2"
+        model._omlx_mtp_max_verify_rows = 8
     copies = []
 
     def propose(self, limit):
@@ -3796,6 +3800,7 @@ def test_block_drafter_copies_keep_output_and_context(monkeypatch, wrong):
     output, terminal = generate(model, [prompt], [limit])
     assert output == expected
     assert copies
+    assert max(shape[1] for shape in _verify_widths(model)) == (8 if wide else 6)
     # Copy cycles feed their committed rows without drafting a block.
     for uid in terminal:
         assert drafter.fed[uid] == len(output[uid])
